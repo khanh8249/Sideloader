@@ -1,13 +1,15 @@
-name: Cross-Compile Linux ARMv7
+name: Build Linux ARMv7
 
 on:
   push:
     branches: [main, master]
+  pull_request:
+    branches: [main, master]
   workflow_dispatch:
 
 jobs:
-  cross-compile:
-    runs-on: ubuntu-latest
+  build-armv7:
+    runs-on: ubuntu-24.04-arm  # Native ARM runner, khỏi QEMU
     
     steps:
       - name: Checkout
@@ -15,31 +17,22 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ldc dub git gcc-arm-linux-gnueabihf \
-            libimobiledevice-dev libplist-dev libssl-dev pkg-config
+          sudo apt-get install -y gcc ldc dub git \
+            libimobiledevice-dev libplist-dev \
+            libssl-dev libcurl4-openssl-dev pkg-config
 
-      - name: Download LDC ARM runtime
+      - name: Build
         run: |
-          wget -q https://github.com/ldc-developers/ldc/releases/download/v1.39.0/ldc2-1.39.0-linux-armhf.tar.xz
-          tar xf ldc2-1.39.0-linux-armhf.tar.xz
-
-      - name: Cross-compile
-        run: |
-          export LDC_ARM=./ldc2-1.39.0-linux-armhf
-          dub build --compiler=ldc2 --build=release \
-            --arch=armv7l-linux-gnueabihf \
-            --override-config=default \
-            -- \
-            -mtriple=armv7l-linux-gnueabihf \
-            -L-L$LDC_ARM/lib \
-            -L-ldruntime-ldc-shared \
-            -L-lphobos2-ldc-shared
+          dub build --compiler=ldc2 --build=release
+          mkdir -p dist
+          cp bin/sideloader dist/sideloader-linux-armv7
+          chmod +x dist/sideloader-linux-armv7
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: sideloader-armv7-cross
-          path: bin/sideloader
+          name: sideloader-linux-armv7
+          path: dist/sideloader-linux-armv7
