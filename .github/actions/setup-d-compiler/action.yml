@@ -14,12 +14,10 @@ runs:
       with:
         compiler: ldc-1.34.0
 
-    - if: inputs.target-triple == 'aarch64-linux-gnu'
-      name: "Set-up AArch64-linux cross-compiler."
-      uses: ./.github/actions/target-aarch64-linux-gnu
-
-    - if: inputs.target-triple == 'armv7-linux-gnueabihf'
-      name: "Set-up ARMv7-linux cross-compiler."
+    - - if: inputs.target-triple == 'armv7-linux-gnueabihf'
+  name: "Set-up ARMv7-linux cross-compiler."
+  uses: ./.github/actions/target-armv7-linux-gnueabihf
+  
       shell: bash
       run: |
         sudo apt-get update
