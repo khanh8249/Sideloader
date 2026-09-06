@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-armv7:
-    runs-on: ubuntu-24.04-arm  # Native ARM runner, khỏi QEMU
+    runs-on: ubuntu-24.04-arm
     
     steps:
       - name: Checkout
@@ -26,10 +26,27 @@ jobs:
 
       - name: Build
         run: |
+          # Build executable thay vì library
+          dub build :sideloader --compiler=ldc2 --build=release || \
+          dub build --compiler=ldc2 --build=release --config=application || \
           dub build --compiler=ldc2 --build=release
+          
+          # Tìm file output
+          find . -name "sideloader" -type f
+          ls -la bin/ 2>/dev/null || true
+
+      - name: Package
+        run: |
           mkdir -p dist
-          cp bin/sideloader dist/sideloader-linux-armv7
-          chmod +x dist/sideloader-linux-armv7
+          # Tìm và copy file
+          BIN=$(find . -name "sideloader" -type f | head -1)
+          if [ -n "$BIN" ]; then
+            cp "$BIN" dist/sideloader-linux-armv7
+            chmod +x dist/sideloader-linux-armv7
+          else
+            echo "Binary not found!"
+            exit 1
+          fi
 
       - name: Upload
         uses: actions/upload-artifact@v4
