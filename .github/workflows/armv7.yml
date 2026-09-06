@@ -34,11 +34,7 @@ jobs:
 
       - name: Write version file
         uses: ./.github/actions/write-version-file
-
-      - name: Fetch dependencies
-        run: |
-          dub fetch
-
+        
       - name: Patch argparse for LDC 1.34
         shell: bash
         run: |
