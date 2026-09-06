@@ -1,41 +1,138 @@
-name: Set-up D compiler for the selected target
-description: Install LDC and add the demanded target if needed.
+name: CLI build - ARMv7
 
-inputs:
-  target-triple:
-    description: Target triple
-    required: true
+on:
+  workflow_dispatch:
 
-runs:
-  using: composite
+env:
+  BUILD_TYPE: Release
 
-  steps:
-    - uses: dlang-community/setup-dlang@v1
-      with:
-        compiler: ldc-1.34.0
+jobs:
+  build:
+    name: Build CLI for armv7-linux-gnueabihf
+    runs-on: ubuntu-22.04
 
-    - if: inputs.target-triple == 'aarch64-linux-gnu'
-      name: "Set-up AArch64-linux cross-compiler."
-      uses: ./.github/actions/target-aarch64-linux-gnu
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - if: inputs.target-triple == 'armv7-linux-gnueabihf'
-      name: "Set-up ARMv7-linux cross-compiler."
-      shell: bash
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          gcc-arm-linux-gnueabihf \
-          g++-arm-linux-gnueabihf \
-          binutils-arm-linux-gnueabihf
+      - name: Update APT repos
+        run: sudo apt-get update
 
-    - if: inputs.target-triple == 'arm64-apple-macos'
-      name: "Set-up ARM64-macOS cross-compiler."
-      uses: ./.github/actions/target-arm64-apple-macos
+      - name: Install ARMv7 toolchain
+        run: |
+          sudo apt-get install -y \
+            gcc-arm-linux-gnueabihf \
+            g++-arm-linux-gnueabihf \
+            binutils-arm-linux-gnueabihf
 
-    - if: inputs.target-triple == 'x86_64-apple-darwin'
-      name: "Set-up x86_64-macOS cross-compiler."
-      uses: ./.github/actions/target-x86_64-apple-darwin
+      - name: Set-up D compiler
+        uses: ./.github/actions/setup-d-compiler
+        with:
+          target-triple: armv7-linux-gnueabihf
 
-    - if: inputs.target-triple == 'x86_64-windows-msvc'
-      name: "Set-up x86_64-windows cross-compiler."
-      uses: ./.github/actions/target-x86_64-windows-msvc
+      - name: Write version file
+        uses: ./.github/actions/write-version-file
+
+      - name: Fetch dependencies
+        run: |
+          dub fetch
+
+      - name: Patch argparse for LDC 1.34
+        shell: bash
+        run: |
+          ARGPARSE="$HOME/.dub/packages/argparse/1.3.0/argparse/source/argparse/internal/parser.d"
+
+          if [ ! -f "$ARGPARSE" ]; then
+            echo "argparse parser.d not found:"
+            find "$HOME/.dub/packages" -path '*argparse*parser.d' -print
+            exit 1
+          fi
+
+          echo "Using:"
+          echo "$ARGPARSE"
+
+          sed -n '1,45p' "$ARGPARSE"
+
+          python3 - "$ARGPARSE" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+
+          # LDC 1.34/std.range returns size_t/ulong on this target.
+          # argparse 1.3.0 stores the result in uint.
+          text = re.sub(
+              r'\bminValuesCount\s*=\s*([^\n;]+)',
+              r'minValuesCount = cast(uint)(\1)',
+              text,
+              count=2
+          )
+
+          path.write_text(text)
+          PY
+
+          echo
+          echo "After patch:"
+          sed -n '1,45p' "$ARGPARSE"
+
+      - name: Configure ARMv7 environment
+        run: |
+          cat >> "$GITHUB_ENV" <<'EOF'
+          CC=arm-linux-gnueabihf-gcc
+          CXX=arm-linux-gnueabihf-g++
+          AR=arm-linux-gnueabihf-ar
+          AS=arm-linux-gnueabihf-as
+          STRIP=arm-linux-gnueabihf-strip
+          EOF
+
+      - name: Check toolchain
+        run: |
+          echo "=== GCC ==="
+          arm-linux-gnueabihf-gcc --version
+
+          echo
+          echo "=== LDC ==="
+          ldc2 --version
+
+          echo
+          echo "=== DUB ==="
+          dub --version
+
+      - name: Build CLI
+        run: |
+          dub build \
+            -b release-debug \
+            --compiler=ldc2 \
+            --arch armv7-linux-gnueabihf \
+            :cli-frontend
+
+      - name: Inspect generated binary
+        run: |
+          echo "=== FILE ==="
+          file bin/*
+
+          echo
+          echo "=== ELF HEADER ==="
+
+          for f in bin/*; do
+            if file "$f" | grep -q ELF; then
+              arm-linux-gnueabihf-readelf -h "$f"
+              echo
+            fi
+          done
+
+      - name: Move files around for artifact
+        uses: ./.github/actions/rename-files
+        with:
+          build-tag: cli-armv7-linux-gnueabihf
+
+      - name: Upload ARMv7 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sideloader-cli-armv7-linux-gnueabihf
+          path: |
+            ${{ github.workspace }}/bin/*
