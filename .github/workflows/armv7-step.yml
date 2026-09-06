@@ -1,15 +1,12 @@
-# .github/workflows/build-linux-armv7.yml
-name: Build Linux ARMv7
+name: Cross-Compile Linux ARMv7
 
 on:
   push:
     branches: [main, master]
-  pull_request:
-    branches: [main, master]
   workflow_dispatch:
 
 jobs:
-  build-armv7:
+  cross-compile:
     runs-on: ubuntu-latest
     
     steps:
@@ -18,66 +15,31 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Setup QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ldc dub git gcc-arm-linux-gnueabihf \
+            libimobiledevice-dev libplist-dev libssl-dev pkg-config
 
-      - name: Build CLI
-        uses: uraimo/run-on-arch-action@v2
-        with:
-          arch: armv7
-          distro: ubuntu_latest
-          install: |
-            apt-get update
-            apt-get install -y gcc ldc dub git \
-              libimobiledevice-dev libplist-dev \
-              libssl-dev libcurl4-openssl-dev pkg-config
-          run: |
-            dub build --compiler=ldc2 --build=release
-            mkdir -p dist
-            cp bin/sideloader dist/sideloader-linux-armv7
-            chmod +x dist/sideloader-linux-armv7
+      - name: Download LDC ARM runtime
+        run: |
+          wget -q https://github.com/ldc-developers/ldc/releases/download/v1.39.0/ldc2-1.39.0-linux-armhf.tar.xz
+          tar xf ldc2-1.39.0-linux-armhf.tar.xz
 
-      - name: Upload CLI Artifact
+      - name: Cross-compile
+        run: |
+          export LDC_ARM=./ldc2-1.39.0-linux-armhf
+          dub build --compiler=ldc2 --build=release \
+            --arch=armv7l-linux-gnueabihf \
+            --override-config=default \
+            -- \
+            -mtriple=armv7l-linux-gnueabihf \
+            -L-L$LDC_ARM/lib \
+            -L-ldruntime-ldc-shared \
+            -L-lphobos2-ldc-shared
+
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: sideloader-linux-armv7
-          path: dist/sideloader-linux-armv7
-
-  build-armv7-gtk:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Setup QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm
-
-      - name: Build GTK GUI
-        uses: uraimo/run-on-arch-action@v2
-        with:
-          arch: armv7
-          distro: ubuntu_latest
-          install: |
-            apt-get update
-            apt-get install -y gcc ldc dub git \
-              libimobiledevice-dev libplist-dev \
-              libssl-dev libcurl4-openssl-dev pkg-config \
-              libadwaita-1-dev libgtk-4-dev libharfbuzz-dev
-          run: |
-            dub build :gtk --compiler=ldc2 --build=release
-            mkdir -p dist
-            cp bin/sideloader-gtk dist/sideloader-gtk-armv7
-            chmod +x dist/sideloader-gtk-armv7
-
-      - name: Upload GTK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sideloader-gtk-armv7
-          path: dist/sideloader-gtk-armv7
+          name: sideloader-armv7-cross
+          path: bin/sideloader
