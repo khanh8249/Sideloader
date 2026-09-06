@@ -26,6 +26,9 @@ jobs:
           - triple: 'arm64-apple-macos'
             target: 'macos'
 
+          - triple: 'arm-linux-gnueabihf'
+            target: 'linux'
+
     name: Build CLI for ${{ matrix.triple }}
 
     runs-on: ubuntu-22.04
