@@ -26,21 +26,44 @@ jobs:
 
       - name: Build
         run: |
-          # Build executable thay vì library
-          dub build :sideloader --compiler=ldc2 --build=release || \
-          dub build --compiler=ldc2 --build=release --config=application || \
           dub build --compiler=ldc2 --build=release
+
+      - name: Quét sạch tìm binary
+        run: |
+          echo "=== Tất cả file executable ==="
+          find . -type f -executable 2>/dev/null | grep -v ".git/" | grep -v ".dub/obj" | sort
           
-          # Tìm file output
-          find . -name "sideloader" -type f
-          ls -la bin/ 2>/dev/null || true
+          echo ""
+          echo "=== ELF binary (Linux executable) ==="
+          find . -type f -executable -exec sh -c 'file "$1" | grep -q ELF && echo "$1"' _ {} \; 2>/dev/null | grep -v ".git/" | sort
+          
+          echo ""
+          echo "=== File trong bin/ ==="
+          ls -laR bin/ 2>/dev/null || echo "Không có bin/"
+          
+          echo ""
+          echo "=== File trong .dub/ ==="
+          find .dub/ -type f 2>/dev/null | sort || echo "Không có .dub/"
+          
+          echo ""
+          echo "=== Tìm theo tên sideloader ==="
+          find . -iname "*sideloader*" -type f 2>/dev/null | grep -v ".git/"
 
       - name: Package
         run: |
           mkdir -p dist
-          # Tìm và copy file
-          BIN=$(find . -name "sideloader" -type f | head -1)
-          if [ -n "$BIN" ]; then
+          
+          # Quét sạch ELF binary, lấy cái to nhất (thường là main binary)
+          BIN=$(find . -type f -executable -exec sh -c 'file "$1" | grep -q "ELF.*executable" && echo "$1"' _ {} \; 2>/dev/null | grep -v ".git/" | grep -v ".dub/obj" | xargs -I{} ls -la {} 2>/dev/null | sort -k5 -n -r | head -1 | awk '{print $NF}')
+          
+          if [ -z "$BIN" ]; then
+            # Fallback: bất kỳ file executable nào
+            BIN=$(find . -type f -executable 2>/dev/null | grep -v ".git/" | grep -v ".dub/obj" | head -1)
+          fi
+          
+          if [ -n "$BIN" ] && [ -f "$BIN" ]; then
+            echo "Found binary: $BIN"
+            file "$BIN"
             cp "$BIN" dist/sideloader-linux-armv7
             chmod +x dist/sideloader-linux-armv7
           else
