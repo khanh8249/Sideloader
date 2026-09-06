@@ -1,0 +1,83 @@
+# .github/workflows/build-linux-armv7.yml
+name: Build Linux ARMv7
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-armv7:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Build CLI
+        uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: armv7
+          distro: ubuntu_latest
+          install: |
+            apt-get update
+            apt-get install -y gcc ldc dub git \
+              libimobiledevice-dev libplist-dev \
+              libssl-dev libcurl4-openssl-dev pkg-config
+          run: |
+            dub build --compiler=ldc2 --build=release
+            mkdir -p dist
+            cp bin/sideloader dist/sideloader-linux-armv7
+            chmod +x dist/sideloader-linux-armv7
+
+      - name: Upload CLI Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sideloader-linux-armv7
+          path: dist/sideloader-linux-armv7
+
+  build-armv7-gtk:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Build GTK GUI
+        uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: armv7
+          distro: ubuntu_latest
+          install: |
+            apt-get update
+            apt-get install -y gcc ldc dub git \
+              libimobiledevice-dev libplist-dev \
+              libssl-dev libcurl4-openssl-dev pkg-config \
+              libadwaita-1-dev libgtk-4-dev libharfbuzz-dev
+          run: |
+            dub build :gtk --compiler=ldc2 --build=release
+            mkdir -p dist
+            cp bin/sideloader-gtk dist/sideloader-gtk-armv7
+            chmod +x dist/sideloader-gtk-armv7
+
+      - name: Upload GTK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sideloader-gtk-armv7
+          path: dist/sideloader-gtk-armv7
