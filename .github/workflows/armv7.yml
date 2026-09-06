@@ -1,0 +1,86 @@
+name: ARMv7 CLI build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    name: Build CLI for armv7-linux-gnueabihf
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Update APT repos
+        run: sudo apt-get update
+
+      - name: Set-up D compiler
+        uses: ./.github/actions/setup-d-compiler
+        with:
+          target-triple: armv7-linux-gnueabihf
+
+      - name: Write version file
+        uses: ./.github/actions/write-version-file
+
+      - name: Show toolchain
+        run: |
+          echo "=== LDC ==="
+          ldc2 --version
+
+          echo
+          echo "=== ARM GCC ==="
+          arm-linux-gnueabihf-gcc --version
+
+          echo
+          echo "=== DUB ==="
+          dub --version
+
+      - name: Resolve dependencies
+        run: |
+          dub describe \
+            --compiler=ldc2 \
+            --arch=armv7-linux-gnueabihf \
+            :cli-frontend
+
+      - name: Build CLI
+        run: |
+          dub build \
+            -b release-debug \
+            --compiler=ldc2 \
+            --arch=armv7-linux-gnueabihf \
+            :cli-frontend
+
+      - name: Inspect binary
+        run: |
+          echo "=== bin ==="
+          ls -lah bin/
+
+          echo
+          echo "=== file ==="
+          file bin/sideloader
+
+          echo
+          echo "=== ELF ==="
+          arm-linux-gnueabihf-readelf -h bin/sideloader
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifact
+          cp bin/sideloader artifact/sideloader-armv7-linux
+          chmod +x artifact/sideloader-armv7-linux
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sideloader-cli-armv7-linux
+          path: artifact/sideloader-armv7-linux
+          if-no-files-found: error
