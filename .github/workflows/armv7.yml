@@ -18,7 +18,6 @@ jobs:
           sudo apt update
           sudo apt install -y wget unzip curl xz-utils python3
 
-      # ========== NDK ==========
       - name: Download Android NDK r27
         run: |
           cd $HOME
@@ -27,7 +26,6 @@ jobs:
           echo "ANDROID_NDK_HOME=$HOME/android-ndk-r27" >> $GITHUB_ENV
           echo "$HOME/android-ndk-r27/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
-      # ========== LDC ==========
       - name: Download LDC 1.43.0
         run: |
           cd $HOME
@@ -61,41 +59,40 @@ jobs:
           }
           EOF
 
-      # ========== Botan upgrade ==========
-      - name: Upgrade Botan to 1.13.9
-        run: |
-          sed -i 's/"botan": "~>1.13"/"botan": "~>1.13.9"/' dub.json
-          rm -f dub.selections.json
-          grep botan dub.json
-
-      # ========== First build (tải deps) ==========
-      - name: First build attempt (download deps)
+      # ========== TẢI DEPS TRƯỚC KHI PATCH ==========
+      - name: Fetch all dependencies
         continue-on-error: true
         run: |
-          ldc2 --version
-          dub build --compiler=ldc2 -a armv7a-unknown-linux-android28 --build=release frontends/cli || true
+          # Force fetch deps (không build thành công, nhưng tải deps về)
+          dub build \
+              --compiler=ldc2 \
+              -a armv7a-unknown-linux-android28 \
+              --build=release \
+              frontends/cli 2>&1 | tail -20 || true
+          
+          echo "=== Check deps downloaded ==="
+          ls ~/.dub/packages/ | head -20
 
-      # ========== Patch argparse ==========
+      # ========== PATCH ARGPARSE ==========
       - name: Patch argparse
         run: |
           python3 << 'PYEOF'
           import os
+          import glob
 
-          base = os.path.expanduser('~/.dub/packages/argparse')
-          if not os.path.exists(base):
-              print("argparse not found, skip")
-              exit(0)
+          # Tìm argparse ở mọi version
+          candidates = glob.glob(os.path.expanduser('~/.dub/packages/argparse/*/argparse'))
+          if not candidates:
+              print("ERROR: argparse not found!")
+              exit(1)
 
-          parser_path = None
-          help_path = None
-          for root, dirs, files in os.walk(base):
-              for f in files:
-                  if f == 'parser.d':
-                      parser_path = os.path.join(root, f)
-                  elif f == 'help.d':
-                      help_path = os.path.join(root, f)
+          base = candidates[0]
+          print("Patching: " + base)
 
-          if parser_path:
+          parser_path = os.path.join(base, 'source/argparse/internal/parser.d')
+          help_path = os.path.join(base, 'source/argparse/internal/help.d')
+
+          if os.path.exists(parser_path):
               s = open(parser_path).read()
               s = s.replace('values = args[0..minValuesCount];',
                             'values = args[0..cast(uint) minValuesCount];')
@@ -103,27 +100,36 @@ jobs:
                             'args = args[cast(uint) minValuesCount..$];')
               open(parser_path, 'w').write(s)
               print("Patched parser.d")
+          else:
+              print("parser.d NOT FOUND at " + parser_path)
+              exit(1)
 
-          if help_path:
+          if os.path.exists(help_path):
               s = open(help_path).read()
               s = s.replace("return ' '.repeat(num).array;",
                             "return ' '.repeat(cast(size_t) num).array;")
               open(help_path, 'w').write(s)
               print("Patched help.d")
+          else:
+              print("help.d NOT FOUND at " + help_path)
+              exit(1)
 
-          print("argparse patch done")
+          print("argparse patch DONE")
           PYEOF
 
-      # ========== Patch Botan ==========
+      # ========== PATCH BOTAN ==========
       - name: Patch Botan
         run: |
           python3 << 'PYEOF'
-          import os, re
+          import os, re, glob
 
-          base = os.path.expanduser('~/.dub/packages/botan')
-          if not os.path.exists(base):
+          candidates = glob.glob(os.path.expanduser('~/.dub/packages/botan/*/botan'))
+          if not candidates:
               print("botan not found, skip")
               exit(0)
+
+          base = candidates[0]
+          print("Patching: " + base)
 
           count = 0
           for root, dirs, files in os.walk(base):
@@ -135,30 +141,30 @@ jobs:
                       s = open(path).read()
                   except:
                       continue
-
                   orig = s
-
-                  # Fix 1: delete X; → X.destroy();
                   s = re.sub(
                       r'\bdelete\s+([A-Za-z_][A-Za-z0-9_.]*(?:\([^;)]*\))?)\s*;',
-                      r'\1.destroy();',
-                      s
+                      r'\1.destroy();', s
                   )
-
-                  # Fix 2: constructor visibility
                   s = re.sub(r'^(\s+)this\(ALLOC\)', r'\1public this(ALLOC)', s, flags=re.MULTILINE)
                   s = re.sub(r'^(\s+)this\(DataSource', r'\1public this(DataSource', s, flags=re.MULTILINE)
                   s = re.sub(r'^(\s+)this\(in string', r'\1public this(in string', s, flags=re.MULTILINE)
-
                   if s != orig:
                       open(path, 'w').write(s)
                       print(path + ": patched")
                       count += 1
-
           print("Botan: " + str(count) + " files patched")
           PYEOF
 
-      # ========== Build chính ==========
+      # ========== VERIFY PATCH ==========
+      - name: Verify patches
+        run: |
+          echo "=== argparse parser.d ==="
+          find ~/.dub/packages/argparse -name parser.d -exec grep -l "cast(uint) minValuesCount" {} \;
+          echo "=== argparse help.d ==="
+          find ~/.dub/packages/argparse -name help.d -exec grep -l "cast(size_t) num" {} \;
+
+      # ========== BUILD CHÍNH ==========
       - name: Build
         env:
           ANISETTE_URL: "https://anisette-v3-server-sg29.onrender.com/"
@@ -168,16 +174,14 @@ jobs:
               --compiler=ldc2 \
               -a armv7a-unknown-linux-android28 \
               --build=release \
-              :cli-frontend
+              frontends/cli
 
-      # ========== Verify ==========
       - name: Verify binary
         if: success()
         run: |
           file frontends/cli/sideloader
           readelf -a frontends/cli/sideloader | grep -i tls || true
 
-      # ========== Upload ==========
       - name: Upload artifact
         if: success()
         uses: actions/upload-artifact@v4
