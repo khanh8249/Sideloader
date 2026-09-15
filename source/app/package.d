@@ -1,71 +1,29 @@
 module app;
 
 import file = std.file;
-import std.math;
 import std.path;
-import std.zip;
+import std.process : environment;
 
 import slf4d;
 
-import requests;
-
 import provision;
-
-import constants;
 
 struct ProvisioningData {
     Device device;
-    ADI adi;
+    ADI adi;  // luôn null — không dùng nữa
 }
 
-bool downloadAndInstallDeps(string configurationPath, bool delegate(float progress) downloadCallback) {
-    auto log = getLogger();
-
-    log.info("Downloading APK...");
-    Request request = Request();
-    request.sslSetVerifyPeer(false);
-    request.useStreaming = true;
-
-    auto response = request.get(nativesUrl);
-    auto responseStream = response.receiveAsRange();
-
-    auto size = cast(float) response.contentLength;
-    size = size ? size : 150_000_000.0 /+ Rough estimate if we don't know the exact size. +/;
-
-    ubyte[] apkData;
-    while(!responseStream.empty) {
-        if (downloadCallback(cast(float) response.contentReceived / size))
-            return false;
-        apkData ~= responseStream.front;
-        responseStream.popFront();
+// === Đọc URL anisette từ env, fallback VPS ===
+string anisetteServerUrl() {
+    auto url = environment.get("ANISETTE_URL");
+    if (url is null || url.length == 0) {
+        url = "https://anisette-v3-server-sg29.onrender.com/";
     }
-    downloadCallback(1.);
-
-    auto apk = new ZipArchive(apkData);
-    auto dir = apk.directory();
-
-    string libPath = configurationPath.buildPath("lib");
-    if (!file.exists(libPath)) {
-        file.mkdirRecurse(libPath);
-    }
-
-    version (X86_64) {
-        enum string architectureIdentifier = "x86_64";
-    } else version (X86) {
-        enum string architectureIdentifier = "x86";
-    } else version (AArch64) {
-        enum string architectureIdentifier = "arm64-v8a";
-    } else version (ARM) {
-        enum string architectureIdentifier = "armeabi-v7a";
-    } else {
-        static assert(false, "Architecture not supported :(");
-    }
-    file.write(libPath.buildPath("libCoreADI.so"), apk.expand(dir["lib/" ~ architectureIdentifier ~ "/libCoreADI.so"]));
-    file.write(libPath.buildPath("libstoreservicescore.so"), apk.expand(dir["lib/" ~ architectureIdentifier ~ "/libstoreservicescore.so"]));
-    log.info("Extracted successfully!");
-    return true;
+    if (url[$ - 1] != '/') url ~= '/';
+    return url;
 }
 
+// === Chỉ tạo Device, KHÔNG load native, KHÔNG provision local ===
 ProvisioningData initializeADI(string configurationPath) {
     auto log = getLogger();
     auto device = new Device(configurationPath.buildPath("device.json"));
@@ -78,7 +36,8 @@ ProvisioningData initializeADI(string configurationPath) {
         import std.range;
         import std.uni;
         import std.uuid;
-        device.serverFriendlyDescription = "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>";
+        // Bỏ com.apple.dt.Xcode — Apple block Client-Info này
+        device.serverFriendlyDescription = "<MacBookPro18,3> <Mac OS X;26.5.2> <com.apple.AuthKit/1 (com.apple.akd/1)>";
         device.uniqueDeviceIdentifier = randomUUID().toString().toUpper();
         device.adiIdentifier = (cast(ubyte[]) rndGen.take(2).array()).toHexString().toLower();
         device.localUserUUID = (cast(ubyte[]) rndGen.take(8).array()).toHexString().toUpper();
@@ -86,18 +45,7 @@ ProvisioningData initializeADI(string configurationPath) {
     }
     log.debug_("Device OK.");
 
-    auto adi = new ADI(configurationPath.buildPath("lib"));
-    adi.provisioningPath = configurationPath;
-    adi.identifier = device.adiIdentifier;
+    log.infoF!"Using remote anisette server: %s"(anisetteServerUrl());
 
-    if (!adi.isMachineProvisioned(-2)) {
-        log.info("Provisioning device...");
-
-        ProvisioningSession provisioningSession = new ProvisioningSession(adi, device);
-        provisioningSession.provision(-2);
-        log.info("Device provisioned successfully.");
-    }
-    log.debug_("Provisioning OK.");
-
-    return ProvisioningData(device, adi);
+    return ProvisioningData(device, null);
 }
