@@ -82,10 +82,10 @@ class DeveloperSession {
         this.appleAccount = appleAccount;
     }
 
-    static DeveloperLoginResponse login(Device device, ADI adi, string appleId, string password, TFAHandlerDelegate tfaHandler) {
+    static DeveloperLoginResponse login(Device device, string appleId, string password, TFAHandlerDelegate tfaHandler) {
         auto log = getLogger();
         log.infoF!"Creating DeveloperSession for %s..."(appleId);
-        return AppleAccount.login(XcodeApplicationInformation, device, adi, appleId, password, tfaHandler).match!(
+        return AppleAccount.login(XcodeApplicationInformation, device, appleId, password, tfaHandler).match!(
             (AppleAccount appleAccount) {
                 log.info("DeveloperSession created successfully.");
                 return DeveloperLoginResponse(new DeveloperSession(appleAccount));
@@ -97,10 +97,10 @@ class DeveloperSession {
         );
     }
 
-    static DeveloperLoginResponse login(Device device, ADI adi, string appleId, string password, NextLoginStepHandler nextStepHandler) {
+    static DeveloperLoginResponse login(Device device, string appleId, string password, NextLoginStepHandler nextStepHandler) {
         auto log = getLogger();
         log.infoF!"Creating DeveloperSession for %s..."(appleId);
-        return AppleAccount.login(XcodeApplicationInformation, device, adi, appleId, password, nextStepHandler).match!(
+        return AppleAccount.login(XcodeApplicationInformation, device, appleId, password, nextStepHandler).match!(
             (AppleAccount appleAccount) {
                 log.info("DeveloperSession created successfully.");
                 return DeveloperLoginResponse(new DeveloperSession(appleAccount));
@@ -288,7 +288,6 @@ class DeveloperSession {
 
         auto request = dict(
             "identifier", appIdentifier,
-            // entitlements, [].pl,
             "name", appName,
             "teamId", team.teamId,
         );
@@ -493,13 +492,11 @@ struct ListAppIdsResponse {
     ulong availableQuantity;
 }
 
-// props to https://github.com/iMokhles/IMPortal/blob/master/src/Helpers/Apple/AppServicesHelper.php
 enum AppIdFeatures: string {
     push = "push",
     iCloud = "iCloud",
     inAppPurchase = "inAppPurchase",
     gameCenter = "gameCenter",
-    // ??? = "LPLF93JG7M",
     passbook = "pass",
     interAppAudio = "IAD53UNK2F",
     vpnConfiguration = "V66P55NK2I",
