@@ -1,263 +1,544 @@
-- name: Build Sideloader ARMv7 Android
+name: Build Sideloader - Android ARMv7
 
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches:
+      - armv7
+      - new
+      - main
+
+permissions:
+  contents: read
+
+env:
+  NDK_VERSION: r27d
+  ANDROID_API: "24"
+  MAX_RETRIES: "25"
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: ARMv7 Android / Termux
+    runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Install system deps
+      # ============================================================
+      # HOST PACKAGES
+      # ============================================================
+      - name: Install host dependencies
         run: |
-          sudo apt update
-          sudo apt install -y wget unzip curl xz-utils python3
+          set -eux
 
-      # ========== NDK ==========
-      - name: Download Android NDK r27
-        run: |
-          cd $HOME
-          wget -q https://dl.google.com/android/repository/android-ndk-r27-linux.zip
-          unzip -q android-ndk-r27-linux.zip
-          echo "ANDROID_NDK_HOME=$HOME/android-ndk-r27" >> $GITHUB_ENV
-          echo "$HOME/android-ndk-r27/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+          sudo apt-get update
 
-      # ========== LDC ==========
-      - name: Download LDC 1.43.0
-        run: |
-          cd $HOME
-          wget -q https://github.com/ldc-developers/ldc/releases/download/v1.43.0/ldc2-1.43.0-linux-x86_64.tar.xz
-          tar -xf ldc2-1.43.0-linux-x86_64.tar.xz
-          echo "$HOME/ldc2-1.43.0-linux-x86_64/bin" >> $GITHUB_PATH
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            lld \
+            cmake \
+            ninja-build \
+            pkg-config \
+            git \
+            curl \
+            wget \
+            unzip \
+            xz-utils \
+            python3 \
+            python3-pip \
+            file \
+            binutils \
+            jq
 
-      - name: Download LDC Android ARMv7 addon
+      # ============================================================
+      # ANDROID NDK
+      # ============================================================
+      - name: Install Android NDK
+        shell: bash
         run: |
-          cd $HOME
-          wget -q https://github.com/ldc-developers/ldc/releases/download/v1.43.0/ldc2-1.43.0-addon-android.tar.xz
-          tar -xf ldc2-1.43.0-addon-android.tar.xz -C $HOME/ldc2-1.43.0-linux-x86_64/
+          set -eux
 
-      - name: Setup ldc2.conf for Android ARMv7
+          NDK_VERSION="${NDK_VERSION}"
+
+          mkdir -p "$HOME/android-sdk"
+
+          cd "$HOME/android-sdk"
+
+          wget -q \
+            "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" \
+            -O ndk.zip
+
+          unzip -q ndk.zip
+
+          mv "android-ndk-${NDK_VERSION}" ndk
+
+          echo "ANDROID_NDK_HOME=$HOME/android-sdk/ndk" >> "$GITHUB_ENV"
+          echo "$HOME/android-sdk/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+
+          rm -f ndk.zip
+
+          echo "NDK:"
+          "$HOME/android-sdk/ndk/ndk-build" --version
+
+      # ============================================================
+      # ANDROID ARMV7 TOOLCHAIN
+      # ============================================================
+      - name: Configure Android ARMv7 toolchain
+        shell: bash
         run: |
-          cat > $HOME/ldc2-1.43.0-linux-x86_64/etc/ldc2.conf/60-target-android-armv7a.conf << 'EOF'
-          "armv7a-.*-linux-android":
-          {
-              switches = [
-                  "-defaultlib=phobos2-ldc,druntime-ldc",
-                  "-link-defaultlib-shared=false",
-                  "-mtriple=armv7a-unknown-linux-android28",
-                  "-gcc=/home/runner/android-ndk-r27/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi28-clang",
-                  "-L--sysroot=/home/runner/android-ndk-r27/sysroot",
-                  "-L-L/home/runner/android-ndk-r27/sysroot/usr/lib/arm-linux-androideabi/28"
-              ],
-              lib-dirs = [
-                  "%%ldcbinarypath%%/../lib-android-armv7a"
-              ],
-              rpath = "";
-          }
+          set -eux
+
+          NDK="$ANDROID_NDK_HOME"
+          LLVM="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          TARGET="armv7a-linux-androideabi${ANDROID_API}"
+
+          echo "ANDROID_TARGET=$TARGET" >> "$GITHUB_ENV"
+
+          echo "CC=$LLVM/${TARGET}-clang" >> "$GITHUB_ENV"
+          echo "CXX=$LLVM/${TARGET}-clang++" >> "$GITHUB_ENV"
+
+          echo "AR=$LLVM/llvm-ar" >> "$GITHUB_ENV"
+          echo "RANLIB=$LLVM/llvm-ranlib" >> "$GITHUB_ENV"
+          echo "STRIP=$LLVM/llvm-strip" >> "$GITHUB_ENV"
+
+          echo "ANDROID_CC=$LLVM/${TARGET}-clang" >> "$GITHUB_ENV"
+          echo "ANDROID_CXX=$LLVM/${TARGET}-clang++" >> "$GITHUB_ENV"
+
+          echo "TARGET=$TARGET"
+
+          "$LLVM/${TARGET}-clang" \
+            --version
+
+      # ============================================================
+      # INSTALL LDC
+      # ============================================================
+      - name: Install LDC
+        shell: bash
+        run: |
+          set -eux
+
+          LDC_VERSION="1.41.0"
+
+          mkdir -p "$HOME/ldc"
+
+          wget -q \
+            "https://github.com/ldc-developers/ldc/releases/download/v${LDC_VERSION}/ldc2-${LDC_VERSION}-linux-x86_64.tar.xz" \
+            -O /tmp/ldc.tar.xz
+
+          tar -xf /tmp/ldc.tar.xz \
+            --strip-components=1 \
+            -C "$HOME/ldc"
+
+          echo "$HOME/ldc/bin" >> "$GITHUB_PATH"
+
+          "$HOME/ldc/bin/ldc2" --version
+          "$HOME/ldc/bin/dub" --version
+
+      # ============================================================
+      # CREATE ANDROID LDC WRAPPER
+      #
+      # Dub invokes this wrapper instead of raw ldc2.
+      # The wrapper forces the Android ARMv7 target and linker.
+      # ============================================================
+      - name: Create Android ARMv7 LDC wrapper
+        shell: bash
+        run: |
+          set -eux
+
+          mkdir -p "$HOME/bin"
+
+          cat > "$HOME/bin/ldc2-android-armv7" <<'EOF'
+          #!/usr/bin/env bash
+
+          set -e
+
+          REAL_LDC="$HOME/ldc/bin/ldc2"
+
+          NDK="${ANDROID_NDK_HOME}"
+          LLVM="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          TARGET="armv7a-linux-androideabi24"
+
+          exec "$REAL_LDC" \
+            -mtriple="$TARGET" \
+            -mcpu=cortex-a7 \
+            -mattr=+v7 \
+            "$@" \
+            -L=-fuse-ld=lld \
+            -L=-target="$TARGET" \
+            -L=-Wl,--gc-sections
           EOF
 
-      # ========== FETCH DEPS (build fail cũng được) ==========
-      - name: First build attempt to fetch deps
-        continue-on-error: true
+          chmod +x "$HOME/bin/ldc2-android-armv7"
+
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+          "$HOME/bin/ldc2-android-armv7" --version
+
+      # ============================================================
+      # PROJECT INSPECTION
+      # ============================================================
+      - name: Inspect project
+        shell: bash
         run: |
-          cd $GITHUB_WORKSPACE
-          rm -f dub.selections.json
-          dub build \
-              --compiler=ldc2 \
-              -a armv7a-unknown-linux-android28 \
-              --build=release \
-              frontends/cli 2>&1 | tail -50 || true
-          
-          echo "=== Debug: where are deps? ==="
-          find / -type d -name "argparse" 2>/dev/null | head -5
-          find / -type d -name "botan" 2>/dev/null | head -5
-          ls -la ~/.dub/packages/ 2>/dev/null || echo "no ~/.dub/packages"
-          ls -la $GITHUB_WORKSPACE/.dub/packages/ 2>/dev/null || echo "no workspace .dub/packages"
+          set +e
 
-      # ========== PATCH ARGPARSE ==========
-      - name: Patch argparse
+          echo "================================"
+          echo "PROJECT"
+          echo "================================"
+
+          pwd
+
+          echo
+          echo "DUB FILES:"
+          find . \
+            -type f \
+            \( \
+              -name 'dub.json' \
+              -o -name 'dub.sdl' \
+            \) \
+            -not -path './.git/*' \
+            -print
+
+          echo
+          echo "FRONTENDS:"
+          find frontends \
+            -maxdepth 3 \
+            -type f \
+            -print 2>/dev/null || true
+
+          echo
+          echo "GUI REFERENCES:"
+          grep -RniE \
+            'gtk-d|gtk|glib|gdk|x11|qt|libadwaita' \
+            --include='dub.json' \
+            --include='dub.sdl' \
+            --include='*.d' \
+            . 2>/dev/null | head -300 || true
+
+      # ============================================================
+      # DUB CACHE
+      # ============================================================
+      - name: Prepare Dub cache
+        shell: bash
         run: |
-          python3 << 'PYEOF'
-          import os, glob, subprocess
+          set -eux
 
-          # Tìm argparse ở mọi nơi
-          candidates = []
-          search_paths = [
-              os.path.expanduser('~/.dub/packages/argparse'),
-              os.path.join(os.environ.get('GITHUB_WORKSPACE', ''), '.dub/packages/argparse'),
-              '/home/runner/.dub/packages/argparse',
-          ]
-          for p in search_paths:
-              if os.path.exists(p):
-                  for ver in os.listdir(p):
-                      full = os.path.join(p, ver, 'argparse')
-                      if os.path.exists(full):
-                          candidates.append(full)
-          
-          if not candidates:
-              # Fallback: dùng find
-              try:
-                  result = subprocess.run(
-                      ['find', '/home/runner', '-type', 'd', '-name', 'argparse', '-path', '*packages*'],
-                      capture_output=True, text=True, timeout=30
-                  )
-                  for line in result.stdout.strip().split('\n'):
-                      if line and 'source' not in line:
-                          candidates.append(line)
-              except Exception as e:
-                  print("find failed: " + str(e))
-          
-          if not candidates:
-              print("ERROR: argparse not found anywhere!")
-              print("Searched: " + str(search_paths))
-              exit(1)
-          
-          base = candidates[0]
-          print("Patching argparse at: " + base)
-          
-          parser_path = os.path.join(base, 'source/argparse/internal/parser.d')
-          help_path = os.path.join(base, 'source/argparse/internal/help.d')
-          
-          # Nếu path trên không tồn tại, thử tìm
-          if not os.path.exists(parser_path):
-              for root, dirs, files in os.walk(base):
-                  if 'parser.d' in files and 'internal' in root:
-                      parser_path = os.path.join(root, 'parser.d')
-                  if 'help.d' in files and 'internal' in root:
-                      help_path = os.path.join(root, 'help.d')
-          
-          # Patch parser.d
-          if os.path.exists(parser_path):
-              s = open(parser_path).read()
-              s = s.replace('values = args[0..minValuesCount];',
-                            'values = args[0..cast(uint) minValuesCount];')
-              s = s.replace('args = args[minValuesCount..$];',
-                            'args = args[cast(uint) minValuesCount..$];')
-              open(parser_path, 'w').write(s)
-              print("Patched: " + parser_path)
-          else:
-              print("parser.d NOT FOUND")
-              exit(1)
-          
-          # Patch help.d
-          if os.path.exists(help_path):
-              s = open(help_path).read()
-              s = s.replace("return ' '.repeat(num).array;",
-                            "return ' '.repeat(cast(size_t) num).array;")
-              open(help_path, 'w').write(s)
-              print("Patched: " + help_path)
-          else:
-              print("help.d NOT FOUND")
-              exit(1)
-          
-          print("argparse patch DONE")
-          PYEOF
+          mkdir -p "$HOME/.dub/packages"
 
-      # ========== PATCH BOTAN ==========
-      - name: Patch Botan
+          dub --version
+
+          echo
+          echo "DUB CACHE:"
+          ls -la "$HOME/.dub" || true
+
+      # ============================================================
+      # FETCH
+      # ============================================================
+      - name: Fetch dependencies
+        shell: bash
         run: |
-          python3 << 'PYEOF'
-          import os, re, subprocess
+          set +e
 
-          candidates = []
-          search_paths = [
-              os.path.expanduser('~/.dub/packages/botan'),
-              os.path.join(os.environ.get('GITHUB_WORKSPACE', ''), '.dub/packages/botan'),
-              '/home/runner/.dub/packages/botan',
-          ]
-          for p in search_paths:
-              if os.path.exists(p):
-                  for ver in os.listdir(p):
-                      full = os.path.join(p, ver, 'botan')
-                      if os.path.exists(full):
-                          candidates.append(full)
-          
-          if not candidates:
-              try:
-                  result = subprocess.run(
-                      ['find', '/home/runner', '-type', 'd', '-name', 'botan', '-path', '*packages*'],
-                      capture_output=True, text=True, timeout=30
-                  )
-                  for line in result.stdout.strip().split('\n'):
-                      if line and 'source' not in line:
-                          candidates.append(line)
-              except Exception:
-                  pass
-          
-          if not candidates:
-              print("botan not found, skip")
-              exit(0)
-          
-          base = candidates[0]
-          print("Patching botan at: " + base)
-          
-          count = 0
-          for root, dirs, files in os.walk(base):
-              for f in files:
-                  if not f.endswith('.d'):
-                      continue
-                  path = os.path.join(root, f)
-                  try:
-                      s = open(path).read()
-                  except:
-                      continue
-                  orig = s
-                  
-                  # Fix delete
-                  s = re.sub(
-                      r'\bdelete\s+([A-Za-z_][A-Za-z0-9_.]*(?:\([^;)]*\))?)\s*;',
-                      r'\1.destroy();', s
-                  )
-                  # Fix visibility
-                  s = re.sub(r'^(\s+)this\(ALLOC\)', r'\1public this(ALLOC)', s, flags=re.MULTILINE)
-                  s = re.sub(r'^(\s+)this\(DataSource', r'\1public this(DataSource', s, flags=re.MULTILINE)
-                  s = re.sub(r'^(\s+)this\(in string', r'\1public this(in string', s, flags=re.MULTILINE)
-                  s = re.sub(r'^(\s+)this\(\)', r'\1public this()', s, flags=re.MULTILINE)
-                  
-                  if s != orig:
-                      open(path, 'w').write(s)
-                      print("Patched: " + path)
-                      count += 1
-          
-          print("Botan: " + str(count) + " files patched")
-          PYEOF
+          dub fetch --vverbose
 
-      # ========== VERIFY ==========
-      - name: Verify patches applied
-        run: |
-          echo "=== Verify argparse parser.d ==="
-          find /home/runner -name "parser.d" -path "*argparse*" -exec grep -H "cast(uint) minValuesCount" {} \; || echo "NOT PATCHED"
-          echo "=== Verify argparse help.d ==="
-          find /home/runner -name "help.d" -path "*argparse*" -exec grep -H "cast(size_t) num" {} \; || echo "NOT PATCHED"
+          exit 0
 
-      # ========== BUILD ==========
-      - name: Build
+      # ============================================================
+      # ADAPTIVE BUILD
+      #
+      # The Python patcher is allowed to modify dependency source
+      # inside the Dub cache.
+      #
+      # BUILD FAILURE DOES NOT IMMEDIATELY FAIL THE JOB.
+      # ============================================================
+      - name: Adaptive ARMv7 build
+        shell: bash
         env:
-          ANISETTE_URL: "https://anisette-v3-server-sg29.onrender.com/"
+          DFLAGS: >
+            -mtriple=armv7a-linux-androideabi24
+            -mcpu=cortex-a7
+            -mattr=+v7
         run: |
-          cd $GITHUB_WORKSPACE
-          ldc2 --version
-          dub build \
-              --compiler=ldc2 \
-              -a armv7a-unknown-linux-android28 \
+          set -u
+
+          mkdir -p build-logs
+          mkdir -p .armv7-patches
+
+          RETRIES=0
+
+          while true; do
+            RETRIES=$((RETRIES + 1))
+
+            echo
+            echo "================================================"
+            echo " ARMv7 BUILD ATTEMPT ${RETRIES}/${MAX_RETRIES}"
+            echo "================================================"
+
+            LOG="build-logs/build-${RETRIES}.log"
+
+            rm -rf build-armv7
+
+            set +e
+
+            dub build \
+              :cli-frontend \
+              --compiler="$HOME/bin/ldc2-android-armv7" \
               --build=release \
-              frontends/cli
+              --vverbose \
+              >"$LOG" 2>&1
 
-      - name: Verify binary
-        if: success()
+            STATUS=$?
+
+            set -e
+
+            if [ "$STATUS" -eq 0 ]; then
+              echo
+              echo "==============================================="
+              echo " BUILD SUCCESS"
+              echo "==============================================="
+
+              cp "$LOG" build-logs/final-build.log
+
+              break
+            fi
+
+            echo
+            echo "==============================================="
+            echo " BUILD FAILED"
+            echo "==============================================="
+            echo "Exit code: $STATUS"
+            echo
+            tail -n 120 "$LOG"
+
+            if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+              echo
+              echo "Maximum retry count reached."
+              exit 1
+            fi
+
+            echo
+            echo "Running ARMv7 patcher..."
+
+            set +e
+
+            python3 tools/armv7-patcher.py \
+              "$LOG" \
+              --root "$PWD" \
+              --cache "$HOME/.dub/packages" \
+              --state ".armv7-patches"
+
+            PATCH_STATUS=$?
+
+            set -e
+
+            case "$PATCH_STATUS" in
+
+              0)
+                echo
+                echo "[ARMV7] Patch applied."
+                echo "[ARMV7] Retrying build..."
+                ;;
+
+              10)
+                echo
+                echo "[ARMV7] Error detected but no safe automatic"
+                echo "         patch rule matched."
+                echo
+                echo "The build cannot be automatically repaired."
+                echo "Uploading logs and failing."
+                exit 1
+                ;;
+
+              20)
+                echo
+                echo "[ARMV7] Patch already applied."
+                echo "[ARMV7] Same error appeared again."
+                echo "         Refusing infinite patch loop."
+                exit 1
+                ;;
+
+              *)
+                echo
+                echo "[ARMV7] Patcher internal failure."
+                exit 1
+                ;;
+            esac
+          done
+
+      # ============================================================
+      # LOCATE BINARY
+      # ============================================================
+      - name: Locate binary
+        shell: bash
         run: |
-          file frontends/cli/sideloader
-          readelf -a frontends/cli/sideloader | grep -i tls || true
+          set -eux
 
-      - name: Upload artifact
-        if: success()
+          mkdir -p release
+
+          echo "Executable files:"
+
+          find . \
+            -type f \
+            -perm -111 \
+            -not -path './.git/*' \
+            -not -path './build-logs/*' \
+            -print
+
+          echo
+          echo "ELF files:"
+
+          find . \
+            -type f \
+            -exec file {} \; \
+            | grep -E 'ELF|ARM' \
+            || true
+
+      # ============================================================
+      # FIND ARM BINARY
+      # ============================================================
+      - name: Extract ARMv7 executable
+        shell: bash
+        run: |
+          set -eux
+
+          BIN=""
+
+          while IFS= read -r f; do
+            INFO="$(file "$f" || true)"
+
+            if echo "$INFO" | grep -q 'ELF'; then
+              if echo "$INFO" | grep -q 'ARM'; then
+                BIN="$f"
+                break
+              fi
+            fi
+          done < <(
+            find . \
+              -type f \
+              -perm -111 \
+              -not -path './.git/*'
+          )
+
+          if [ -z "$BIN" ]; then
+            echo "No ARM ELF executable found."
+            exit 1
+          fi
+
+          echo "Found:"
+          echo "$BIN"
+
+          cp "$BIN" release/sideloader-armv7
+
+      # ============================================================
+      # VERIFY ELF
+      # ============================================================
+      - name: Verify ARMv7 Android ELF
+        shell: bash
+        run: |
+          set -eux
+
+          BIN="release/sideloader-armv7"
+
+          file "$BIN"
+
+          echo
+          echo "===== ELF HEADER ====="
+
+          readelf -h "$BIN"
+
+          echo
+          echo "===== ELF MACHINE ====="
+
+          readelf -h "$BIN" | grep -E \
+            'Class:|Machine:|OS/ABI:|Type:'
+
+          echo
+          echo "===== ARM ATTRIBUTES ====="
+
+          readelf -A "$BIN" || true
+
+          echo
+          echo "===== NEEDED LIBRARIES ====="
+
+          readelf -d "$BIN" \
+            | grep NEEDED \
+            || true
+
+          echo
+          echo "===== CHECK ====="
+
+          if ! file "$BIN" | grep -q 'ARM'; then
+            echo "ERROR: output is not ARM."
+            exit 1
+          fi
+
+      # ============================================================
+      # STRIP
+      # ============================================================
+      - name: Strip binary
+        shell: bash
+        run: |
+          set -eux
+
+          "$STRIP" \
+            --strip-unneeded \
+            release/sideloader-armv7
+
+          file release/sideloader-armv7
+
+          ls -lh release/sideloader-armv7
+
+      # ============================================================
+      # PACKAGE
+      # ============================================================
+      - name: Package
+        shell: bash
+        run: |
+          set -eux
+
+          cp build-logs/final-build.log \
+            release/build.log
+
+          cp -r .armv7-patches \
+            release/patch-history
+
+          tar \
+            -C release \
+            -czf sideloader-termux-armv7.tar.gz \
+            sideloader-armv7 \
+            build.log \
+            patch-history
+
+      # ============================================================
+      # UPLOAD ARTIFACT
+      # ============================================================
+      - name: Upload ARMv7 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sideloader-armv7-android9
-          path: frontends/cli/sideloader
-          retention-days: 30
+          name: sideloader-termux-armv7
+          path: |
+            release/sideloader-armv7
+            release/build.log
+            release/patch-history
+            sideloader-termux-armv7.tar.gz
+
+      # ============================================================
+      # UPLOAD FAILURE LOGS
+      # ============================================================
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: armv7-build-diagnostics
+          path: |
+            build-logs/
+            .armv7-patches/
