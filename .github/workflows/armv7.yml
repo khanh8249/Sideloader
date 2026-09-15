@@ -1,4 +1,4 @@
-name: Build Sideloader ARMv7 Android
+- name: Build Sideloader ARMv7 Android
 
 on:
   workflow_dispatch:
@@ -18,6 +18,7 @@ jobs:
           sudo apt update
           sudo apt install -y wget unzip curl xz-utils python3
 
+      # ========== NDK ==========
       - name: Download Android NDK r27
         run: |
           cd $HOME
@@ -26,6 +27,7 @@ jobs:
           echo "ANDROID_NDK_HOME=$HOME/android-ndk-r27" >> $GITHUB_ENV
           echo "$HOME/android-ndk-r27/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
+      # ========== LDC ==========
       - name: Download LDC 1.43.0
         run: |
           cd $HOME
@@ -59,39 +61,77 @@ jobs:
           }
           EOF
 
-      # ========== TẢI DEPS TRƯỚC KHI PATCH ==========
-      - name: Fetch all dependencies
+      # ========== FETCH DEPS (build fail cũng được) ==========
+      - name: First build attempt to fetch deps
         continue-on-error: true
         run: |
-          # Force fetch deps (không build thành công, nhưng tải deps về)
+          cd $GITHUB_WORKSPACE
+          rm -f dub.selections.json
           dub build \
               --compiler=ldc2 \
               -a armv7a-unknown-linux-android28 \
               --build=release \
-              frontends/cli 2>&1 | tail -20 || true
+              frontends/cli 2>&1 | tail -50 || true
           
-          echo "=== Check deps downloaded ==="
-          ls ~/.dub/packages/ | head -20
+          echo "=== Debug: where are deps? ==="
+          find / -type d -name "argparse" 2>/dev/null | head -5
+          find / -type d -name "botan" 2>/dev/null | head -5
+          ls -la ~/.dub/packages/ 2>/dev/null || echo "no ~/.dub/packages"
+          ls -la $GITHUB_WORKSPACE/.dub/packages/ 2>/dev/null || echo "no workspace .dub/packages"
 
       # ========== PATCH ARGPARSE ==========
       - name: Patch argparse
         run: |
           python3 << 'PYEOF'
-          import os
-          import glob
+          import os, glob, subprocess
 
-          # Tìm argparse ở mọi version
-          candidates = glob.glob(os.path.expanduser('~/.dub/packages/argparse/*/argparse'))
+          # Tìm argparse ở mọi nơi
+          candidates = []
+          search_paths = [
+              os.path.expanduser('~/.dub/packages/argparse'),
+              os.path.join(os.environ.get('GITHUB_WORKSPACE', ''), '.dub/packages/argparse'),
+              '/home/runner/.dub/packages/argparse',
+          ]
+          for p in search_paths:
+              if os.path.exists(p):
+                  for ver in os.listdir(p):
+                      full = os.path.join(p, ver, 'argparse')
+                      if os.path.exists(full):
+                          candidates.append(full)
+          
           if not candidates:
-              print("ERROR: argparse not found!")
+              # Fallback: dùng find
+              try:
+                  result = subprocess.run(
+                      ['find', '/home/runner', '-type', 'd', '-name', 'argparse', '-path', '*packages*'],
+                      capture_output=True, text=True, timeout=30
+                  )
+                  for line in result.stdout.strip().split('\n'):
+                      if line and 'source' not in line:
+                          candidates.append(line)
+              except Exception as e:
+                  print("find failed: " + str(e))
+          
+          if not candidates:
+              print("ERROR: argparse not found anywhere!")
+              print("Searched: " + str(search_paths))
               exit(1)
-
+          
           base = candidates[0]
-          print("Patching: " + base)
-
+          print("Patching argparse at: " + base)
+          
           parser_path = os.path.join(base, 'source/argparse/internal/parser.d')
           help_path = os.path.join(base, 'source/argparse/internal/help.d')
-
+          
+          # Nếu path trên không tồn tại, thử tìm
+          if not os.path.exists(parser_path):
+              for root, dirs, files in os.walk(base):
+                  if 'parser.d' in files and 'internal' in root:
+                      parser_path = os.path.join(root, 'parser.d')
+                  if 'help.d' in files and 'internal' in root:
+                      help_path = os.path.join(root, 'help.d')
+          
+          # Patch parser.d
           if os.path.exists(parser_path):
               s = open(parser_path).read()
               s = s.replace('values = args[0..minValuesCount];',
@@ -99,21 +139,22 @@ jobs:
               s = s.replace('args = args[minValuesCount..$];',
                             'args = args[cast(uint) minValuesCount..$];')
               open(parser_path, 'w').write(s)
-              print("Patched parser.d")
+              print("Patched: " + parser_path)
           else:
-              print("parser.d NOT FOUND at " + parser_path)
+              print("parser.d NOT FOUND")
               exit(1)
-
+          
+          # Patch help.d
           if os.path.exists(help_path):
               s = open(help_path).read()
               s = s.replace("return ' '.repeat(num).array;",
                             "return ' '.repeat(cast(size_t) num).array;")
               open(help_path, 'w').write(s)
-              print("Patched help.d")
+              print("Patched: " + help_path)
           else:
-              print("help.d NOT FOUND at " + help_path)
+              print("help.d NOT FOUND")
               exit(1)
-
+          
           print("argparse patch DONE")
           PYEOF
 
@@ -121,16 +162,40 @@ jobs:
       - name: Patch Botan
         run: |
           python3 << 'PYEOF'
-          import os, re, glob
+          import os, re, subprocess
 
-          candidates = glob.glob(os.path.expanduser('~/.dub/packages/botan/*/botan'))
+          candidates = []
+          search_paths = [
+              os.path.expanduser('~/.dub/packages/botan'),
+              os.path.join(os.environ.get('GITHUB_WORKSPACE', ''), '.dub/packages/botan'),
+              '/home/runner/.dub/packages/botan',
+          ]
+          for p in search_paths:
+              if os.path.exists(p):
+                  for ver in os.listdir(p):
+                      full = os.path.join(p, ver, 'botan')
+                      if os.path.exists(full):
+                          candidates.append(full)
+          
+          if not candidates:
+              try:
+                  result = subprocess.run(
+                      ['find', '/home/runner', '-type', 'd', '-name', 'botan', '-path', '*packages*'],
+                      capture_output=True, text=True, timeout=30
+                  )
+                  for line in result.stdout.strip().split('\n'):
+                      if line and 'source' not in line:
+                          candidates.append(line)
+              except Exception:
+                  pass
+          
           if not candidates:
               print("botan not found, skip")
               exit(0)
-
+          
           base = candidates[0]
-          print("Patching: " + base)
-
+          print("Patching botan at: " + base)
+          
           count = 0
           for root, dirs, files in os.walk(base):
               for f in files:
@@ -142,33 +207,40 @@ jobs:
                   except:
                       continue
                   orig = s
+                  
+                  # Fix delete
                   s = re.sub(
                       r'\bdelete\s+([A-Za-z_][A-Za-z0-9_.]*(?:\([^;)]*\))?)\s*;',
                       r'\1.destroy();', s
                   )
+                  # Fix visibility
                   s = re.sub(r'^(\s+)this\(ALLOC\)', r'\1public this(ALLOC)', s, flags=re.MULTILINE)
                   s = re.sub(r'^(\s+)this\(DataSource', r'\1public this(DataSource', s, flags=re.MULTILINE)
                   s = re.sub(r'^(\s+)this\(in string', r'\1public this(in string', s, flags=re.MULTILINE)
+                  s = re.sub(r'^(\s+)this\(\)', r'\1public this()', s, flags=re.MULTILINE)
+                  
                   if s != orig:
                       open(path, 'w').write(s)
-                      print(path + ": patched")
+                      print("Patched: " + path)
                       count += 1
+          
           print("Botan: " + str(count) + " files patched")
           PYEOF
 
-      # ========== VERIFY PATCH ==========
-      - name: Verify patches
+      # ========== VERIFY ==========
+      - name: Verify patches applied
         run: |
-          echo "=== argparse parser.d ==="
-          find ~/.dub/packages/argparse -name parser.d -exec grep -l "cast(uint) minValuesCount" {} \;
-          echo "=== argparse help.d ==="
-          find ~/.dub/packages/argparse -name help.d -exec grep -l "cast(size_t) num" {} \;
+          echo "=== Verify argparse parser.d ==="
+          find /home/runner -name "parser.d" -path "*argparse*" -exec grep -H "cast(uint) minValuesCount" {} \; || echo "NOT PATCHED"
+          echo "=== Verify argparse help.d ==="
+          find /home/runner -name "help.d" -path "*argparse*" -exec grep -H "cast(size_t) num" {} \; || echo "NOT PATCHED"
 
-      # ========== BUILD CHÍNH ==========
+      # ========== BUILD ==========
       - name: Build
         env:
           ANISETTE_URL: "https://anisette-v3-server-sg29.onrender.com/"
         run: |
+          cd $GITHUB_WORKSPACE
           ldc2 --version
           dub build \
               --compiler=ldc2 \
