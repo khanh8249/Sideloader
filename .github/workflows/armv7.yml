@@ -1,86 +1,187 @@
-name: ARMv7 CLI build
+name: Build Sideloader ARMv7 Android
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-
-env:
-  BUILD_TYPE: Release
+    branches: [ main ]
 
 jobs:
   build:
-    name: Build CLI for armv7-linux-gnueabihf
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
-      - name: Update APT repos
-        run: sudo apt-get update
-
-      - name: Set-up D compiler
-        uses: ./.github/actions/setup-d-compiler
-        with:
-          target-triple: armv7-linux-gnueabihf
-
-      - name: Write version file
-        uses: ./.github/actions/write-version-file
-
-      - name: Show toolchain
+      - name: Install system deps
         run: |
-          echo "=== LDC ==="
+          sudo apt update
+          sudo apt install -y wget unzip curl xz-utils python3
+
+      # ========== NDK ==========
+      - name: Download Android NDK r27
+        run: |
+          cd $HOME
+          wget -q https://dl.google.com/android/repository/android-ndk-r27-linux.zip
+          unzip -q android-ndk-r27-linux.zip
+          echo "ANDROID_NDK_HOME=$HOME/android-ndk-r27" >> $GITHUB_ENV
+          echo "$HOME/android-ndk-r27/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      # ========== LDC ==========
+      - name: Download LDC 1.43.0
+        run: |
+          cd $HOME
+          wget -q https://github.com/ldc-developers/ldc/releases/download/v1.43.0/ldc2-1.43.0-linux-x86_64.tar.xz
+          tar -xf ldc2-1.43.0-linux-x86_64.tar.xz
+          echo "$HOME/ldc2-1.43.0-linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Download LDC Android ARMv7 addon
+        run: |
+          cd $HOME
+          wget -q https://github.com/ldc-developers/ldc/releases/download/v1.43.0/ldc2-1.43.0-addon-android.tar.xz
+          tar -xf ldc2-1.43.0-addon-android.tar.xz -C $HOME/ldc2-1.43.0-linux-x86_64/
+
+      - name: Setup ldc2.conf for Android ARMv7
+        run: |
+          cat > $HOME/ldc2-1.43.0-linux-x86_64/etc/ldc2.conf/60-target-android-armv7a.conf << 'EOF'
+          "armv7a-.*-linux-android":
+          {
+              switches = [
+                  "-defaultlib=phobos2-ldc,druntime-ldc",
+                  "-link-defaultlib-shared=false",
+                  "-mtriple=armv7a-unknown-linux-android28",
+                  "-gcc=/home/runner/android-ndk-r27/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi28-clang",
+                  "-L--sysroot=/home/runner/android-ndk-r27/sysroot",
+                  "-L-L/home/runner/android-ndk-r27/sysroot/usr/lib/arm-linux-androideabi/28"
+              ],
+              lib-dirs = [
+                  "%%ldcbinarypath%%/../lib-android-armv7a"
+              ],
+              rpath = "";
+          }
+          EOF
+
+      # ========== Botan upgrade ==========
+      - name: Upgrade Botan to 1.13.9
+        run: |
+          sed -i 's/"botan": "~>1.13"/"botan": "~>1.13.9"/' dub.json
+          rm -f dub.selections.json
+          grep botan dub.json
+
+      # ========== First build (tải deps) ==========
+      - name: First build attempt (download deps)
+        continue-on-error: true
+        run: |
           ldc2 --version
+          dub build --compiler=ldc2 -a armv7a-unknown-linux-android28 --build=release frontends/cli || true
 
-          echo
-          echo "=== ARM GCC ==="
-          arm-linux-gnueabihf-gcc --version
-
-          echo
-          echo "=== DUB ==="
-          dub --version
-
-      - name: Resolve dependencies
+      # ========== Patch argparse ==========
+      - name: Patch argparse
         run: |
-          dub describe \
-            --compiler=ldc2 \
-            --arch=armv7-linux-gnueabihf \
-            :cli-frontend
+          python3 << 'PYEOF'
+          import os
 
-      - name: Build CLI
+          base = os.path.expanduser('~/.dub/packages/argparse')
+          if not os.path.exists(base):
+              print("argparse not found, skip")
+              exit(0)
+
+          parser_path = None
+          help_path = None
+          for root, dirs, files in os.walk(base):
+              for f in files:
+                  if f == 'parser.d':
+                      parser_path = os.path.join(root, f)
+                  elif f == 'help.d':
+                      help_path = os.path.join(root, f)
+
+          if parser_path:
+              s = open(parser_path).read()
+              s = s.replace('values = args[0..minValuesCount];',
+                            'values = args[0..cast(uint) minValuesCount];')
+              s = s.replace('args = args[minValuesCount..$];',
+                            'args = args[cast(uint) minValuesCount..$];')
+              open(parser_path, 'w').write(s)
+              print("Patched parser.d")
+
+          if help_path:
+              s = open(help_path).read()
+              s = s.replace("return ' '.repeat(num).array;",
+                            "return ' '.repeat(cast(size_t) num).array;")
+              open(help_path, 'w').write(s)
+              print("Patched help.d")
+
+          print("argparse patch done")
+          PYEOF
+
+      # ========== Patch Botan ==========
+      - name: Patch Botan
         run: |
+          python3 << 'PYEOF'
+          import os, re
+
+          base = os.path.expanduser('~/.dub/packages/botan')
+          if not os.path.exists(base):
+              print("botan not found, skip")
+              exit(0)
+
+          count = 0
+          for root, dirs, files in os.walk(base):
+              for f in files:
+                  if not f.endswith('.d'):
+                      continue
+                  path = os.path.join(root, f)
+                  try:
+                      s = open(path).read()
+                  except:
+                      continue
+
+                  orig = s
+
+                  # Fix 1: delete X; → X.destroy();
+                  s = re.sub(
+                      r'\bdelete\s+([A-Za-z_][A-Za-z0-9_.]*(?:\([^;)]*\))?)\s*;',
+                      r'\1.destroy();',
+                      s
+                  )
+
+                  # Fix 2: constructor visibility
+                  s = re.sub(r'^(\s+)this\(ALLOC\)', r'\1public this(ALLOC)', s, flags=re.MULTILINE)
+                  s = re.sub(r'^(\s+)this\(DataSource', r'\1public this(DataSource', s, flags=re.MULTILINE)
+                  s = re.sub(r'^(\s+)this\(in string', r'\1public this(in string', s, flags=re.MULTILINE)
+
+                  if s != orig:
+                      open(path, 'w').write(s)
+                      print(path + ": patched")
+                      count += 1
+
+          print("Botan: " + str(count) + " files patched")
+          PYEOF
+
+      # ========== Build chính ==========
+      - name: Build
+        env:
+          ANISETTE_URL: "https://anisette-v3-server-sg29.onrender.com/"
+        run: |
+          ldc2 --version
           dub build \
-            -b release-debug \
-            --compiler=ldc2 \
-            --arch=armv7-linux-gnueabihf \
-            :cli-frontend
+              --compiler=ldc2 \
+              -a armv7a-unknown-linux-android28 \
+              --build=release \
+              :cli-frontend
 
-      - name: Inspect binary
+      # ========== Verify ==========
+      - name: Verify binary
+        if: success()
         run: |
-          echo "=== bin ==="
-          ls -lah bin/
+          file frontends/cli/sideloader
+          readelf -a frontends/cli/sideloader | grep -i tls || true
 
-          echo
-          echo "=== file ==="
-          file bin/sideloader
-
-          echo
-          echo "=== ELF ==="
-          arm-linux-gnueabihf-readelf -h bin/sideloader
-
-      - name: Prepare artifact
-        run: |
-          mkdir -p artifact
-          cp bin/sideloader artifact/sideloader-armv7-linux
-          chmod +x artifact/sideloader-armv7-linux
-
+      # ========== Upload ==========
       - name: Upload artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: sideloader-cli-armv7-linux
-          path: artifact/sideloader-armv7-linux
-          if-no-files-found: error
+          name: sideloader-armv7-android9
+          path: frontends/cli/sideloader
+          retention-days: 30
