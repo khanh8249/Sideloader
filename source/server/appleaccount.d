@@ -10,6 +10,9 @@ import std.sumtype;
 import std.typecons;
 import std.uni;
 import std.zlib;
+import std.net.curl;
+import std.json;
+import std.process : environment;
 
 import botan.block.aes;
 import botan.block.aes_ni;
@@ -67,10 +70,40 @@ alias NextLoginStepHandler = AppleSecondaryActionResponse delegate(string identi
 
 enum RINFO = "17106176";
 
+// === Lấy OTP + machine ID từ VPS anisette-v3 ===
+private ADI.OneTimePassword fetchOTPFromVPS() {
+    auto log = getLogger();
+
+    auto url = environment.get("ANISETTE_URL");
+    if (url is null || url.length == 0) {
+        url = "https://anisette-v3-server-sg29.onrender.com/";
+    }
+    if (url[$ - 1] != '/') url ~= '/';
+
+    log.debugF!"Fetching anisette from %s"(url);
+
+    auto res = get!string(url);
+    auto json = parseJSON(res);
+
+    if (json["X-Apple-I-MD"].type != JSONType.string ||
+        json["X-Apple-I-MD-M"].type != JSONType.string) {
+        throw new Exception("Anisette response thiếu X-Apple-I-MD/X-Apple-I-MD-M");
+    }
+
+    ubyte[] otp = Base64.decode(json["X-Apple-I-MD"].str());
+    ubyte[] mid = Base64.decode(json["X-Apple-I-MD-M"].str());
+
+    log.debugF!"Got OTP=%d bytes, MID=%d bytes"(otp.length, mid.length);
+
+    return ADI.OneTimePassword(
+        null,
+        otp.ptr, cast(uint) otp.length,
+        mid.ptr, cast(uint) mid.length
+    );
+}
+
 package class AppleAccount {
     private Device device;
-    private ADI adi;
-
     private ApplicationInformation appInfo;
 
     private string appleIdentifier;
@@ -83,9 +116,8 @@ package class AppleAccount {
         return appleIdentifier;
     }
 
-    package this(Device device, ADI adi, ApplicationInformation appInfo, string[string] urlBag, string appleId, string adsid, string token) {
+    package this(Device device, ApplicationInformation appInfo, string[string] urlBag, string appleId, string adsid, string token) {
         this.device = device;
-        this.adi = adi;
         this.appInfo = appInfo;
         this.urls = urlBag;
         this.appleIdentifier = appleId;
@@ -93,9 +125,9 @@ package class AppleAccount {
         this.token = token;
     }
 
-    package static AppleLoginResponse login(ApplicationInformation applicationInformation, Device device, ADI adi, string appleId, string password, TFAHandlerDelegate tfaHandler) {
+    package static AppleLoginResponse login(ApplicationInformation applicationInformation, Device device, string appleId, string password, TFAHandlerDelegate tfaHandler) {
         auto log = getLogger();
-        return login(applicationInformation, device, adi, appleId, password, (string identityToken, string[string] urls, string urlBagKey, bool canIgnore) {
+        return login(applicationInformation, device, appleId, password, (string identityToken, string[string] urls, string urlBagKey, bool canIgnore) {
             if (urlBagKey == "repair") {
                 log.info("Apple tells us that your account is broken. We don't care (they actually just want you to add 2FA).");
                 return AppleSecondaryActionResponse(Success());
@@ -113,8 +145,7 @@ package class AppleAccount {
             }
 
             log.debug_("2FA with trusted device needed.");
-            // 2FA is needed
-            auto otp = adi.requestOTP(-2);
+            auto otp = fetchOTPFromVPS();
             auto time = Clock.currTime();
 
             Request request = Request();
@@ -137,7 +168,6 @@ package class AppleAccount {
             ]);
             request.addHeaders(applicationInformation.headers);
 
-            // sends code to the trusted devices
             bool delegate() sendCode;
             if (urlBagKey == "trustedDeviceSecondaryAuth") {
                 sendCode = () {
@@ -146,15 +176,12 @@ package class AppleAccount {
                 };
             } else {
                 sendCode = () {
-                    // urls["trustedDeviceSecondaryAuth"] to select the right phone number.
                     auto res = request.get(urls["secondaryAuth"]);
-                    // auto res = request.put("https://gsa.apple.com/auth/verify/phone/", `{"phoneNumber": {"id": 1}, "mode": "sms"}`);
                     log.infoF!"Code sent: %s"(res.responseBody().data!string());
                     return res.code == 200;
                 };
             }
 
-            // submits the given code to Apple servers
             AppleSecondaryActionResponse response = AppleSecondaryActionResponse(AppleLoginError(AppleLoginErrorCode.no2FAAttempt, "2FA has not been completed."));
             AppleSecondaryActionResponse delegate(string) submitCode;
             if (urlBagKey == "trustedDeviceSecondaryAuth") {
@@ -196,7 +223,7 @@ package class AppleAccount {
         });
     }
 
-    package static AppleLoginResponse login(ApplicationInformation applicationInformation, Device device, ADI adi, string appleId, string password, NextLoginStepHandler nextStepHandler) {
+    package static AppleLoginResponse login(ApplicationInformation applicationInformation, Device device, string appleId, string password, NextLoginStepHandler nextStepHandler) {
         auto log = getLogger();
 
         log.info("Logging in...");
@@ -210,11 +237,7 @@ package class AppleAccount {
             "Content-Type": "text/x-xml-plist",
             "Accept": "text/x-xml-plist",
 
-            // "X-Mme-Device-Id": device.uniqueDeviceIdentifier,
-            // on macOS, MMe for the Client-Info header is written with 2 caps, while on Windows it is Mme...
-            // and HTTP headers are supposed to be case-insensitive in the HTTP spec...
             "X-Mme-Client-Info": device.serverFriendlyDescription,
-            // "X-Apple-I-MD-LU": device.localUserUUID
 
             "User-Agent": applicationInformation.applicationName
         ]);
@@ -232,7 +255,6 @@ package class AppleAccount {
             urls[key] = url.str().native();
         }
 
-        // Apple auth protocol is a slightly modified GSA, see AppleSRPSession code for details
         auto srpSession = new AppleSRPSession();
         auto A = srpSession.step1();
 
@@ -241,14 +263,14 @@ package class AppleAccount {
                 "Version", "1.0.1".pl
             ),
             "Request", dict(
-                "A2k", A.pl, // [SRP] A, 2048
-                "cpd", clientProvidedData(applicationInformation, device, adi),
+                "A2k", A.pl,
+                "cpd", clientProvidedData(applicationInformation, device),
                 "o", "init".pl,
-                "ps", [ // protocols supported
+                "ps", [
                     "s2k".pl,
                     "s2k_fo".pl
                 ].pl,
-                "u", appleId.pl // username
+                "u", appleId.pl
             )
         );
 
@@ -281,7 +303,7 @@ package class AppleAccount {
             "Request", dict(
                 "M1", M1.pl,
                 "c", cookie.pl,
-                "cpd", clientProvidedData(applicationInformation, device, adi),
+                "cpd", clientProvidedData(applicationInformation, device),
                 "o", "complete".pl,
                 "u", appleId.pl
             )
@@ -303,7 +325,6 @@ package class AppleAccount {
         }
 
         auto spd = response2["spd"].data().native();
-        // auto np = response2["np"].str().native(); // we assume that the negociation was well performed, too lazy to check for real
         auto M2 = response2["M2"].data().native();
 
         if (!srpSession.step3(M2)) {
@@ -369,7 +390,7 @@ package class AppleAccount {
                     "c", c.pl,
                     "t", idmsToken.pl,
                     "checksum", checksum.pl,
-                    "cpd", clientProvidedData(applicationInformation, device, adi),
+                    "cpd", clientProvidedData(applicationInformation, device),
                     "o", "apptokens".pl,
                 )
             );
@@ -398,14 +419,14 @@ package class AppleAccount {
             );
             gcm.setKey(sessionKey.ptr, sessionKey.length);
             gcm.setAssociatedData(encryptedToken.ptr, 3);
-            gcm.start(encryptedToken[3..3 + 16].ptr, 16); // iv
+            gcm.start(encryptedToken[3..3 + 16].ptr, 16);
             SecureVector!ubyte decryptedEt = encryptedToken[16 + 3..$];
             gcm.finish(decryptedEt);
             auto decryptedToken = Plist.fromXml(cast(string) decryptedEt[]).dict();
 
             auto token = decryptedToken["t"][applicationInformation.applicationId]["token"].str().native();
 
-            return AppleLoginResponse(new AppleAccount(device, adi, applicationInformation, urls, appleId, adsid, token));
+            return AppleLoginResponse(new AppleAccount(device, applicationInformation, urls, appleId, adsid, token));
         }
 
         switch (hsc) {
@@ -414,14 +435,13 @@ package class AppleAccount {
                 string identityToken = Base64.encode(cast(ubyte[]) (adsid ~ ":" ~ idmsToken));
                 return nextStepHandler(identityToken, urls, secondaryActionKey, canIgnore).match!(
                     (AppleLoginError error) => AppleLoginResponse(error),
-                    (ReloginNeeded _) => login(applicationInformation, device, adi, appleId, password, nextStepHandler),
+                    (ReloginNeeded _) => login(applicationInformation, device, appleId, password, nextStepHandler),
                     (Success _) => completeAuthentication(),
                 );
             case 433: /+ anisetteReprovisionRequired +/
                 log.errorF!"Server requested Anisette reprovision that has not been implemented yet! Here is some debug info: %s"(response2Str);
                 break;
             case 434: /+ anisetteResyncRequired +/
-                auto resyncData = status2["X-Apple-I-MD-DATA"].str().native();
                 log.errorF!"Server requested Anisette resync has not been implemented yet! Here is some debug info: %s"(response2Str);
                 break;
             case 435: /+ urlSwitchingRequired +/
@@ -433,8 +453,8 @@ package class AppleAccount {
         return completeAuthentication();
     }
 
-    private static Plist clientProvidedData(ApplicationInformation applicationInformation, Device device, ADI adi) {
-        auto otp = adi.requestOTP(-2);
+    private static Plist clientProvidedData(ApplicationInformation applicationInformation, Device device) {
+        auto otp = fetchOTPFromVPS();
 
         return dict(
             // Time
@@ -453,8 +473,6 @@ package class AppleAccount {
             "X-Mme-Device-Id", device.uniqueDeviceIdentifier.pl,
             // Miscellaneous headers took from a real request
             "bootstrap", true.pl,
-            // "capp": applicationInformation.applicationName.pl,
-            // "ckgen": true.pl,
             "icscrec", true.pl,
             "loc", locale().pl,
             "pbe", false.pl,
@@ -466,7 +484,7 @@ package class AppleAccount {
     package Plist sendRequest(string url, Plist request) {
         auto rq = Request();
 
-        auto otp = adi.requestOTP(-2);
+        auto otp = fetchOTPFromVPS();
         auto time = Clock.currTime();
 
         rq.sslSetVerifyPeer(false); // FIXME: SSL pin
@@ -492,7 +510,6 @@ package class AppleAccount {
             "X-Apple-I-TimeZone": time.timezone.dstName,
         ]);
 
-        // Application information
         rq.addHeaders(appInfo.headers);
         Response httpResponse;
         if (request !is null) {
