@@ -74,7 +74,6 @@ auto openAppFolder(string path) {
     return new Application(path);
 }
 
-
 auto readFile(string path) {
     return cast(ubyte[]) file.read(path);
 }
@@ -99,15 +98,12 @@ string readPasswordLine(string prompt) {
     }
 }
 
-DeveloperSession login(Device device, ADI adi, bool interactive) {
+DeveloperSession login(Device device, bool interactive) {
     auto log = getLogger();
 
     log.info("Logging in...");
 
     DeveloperSession account;
-
-    // TODO Keyring stuff
-    // ...
 
     if (account) return null;
     if (!interactive) {
@@ -124,7 +120,6 @@ DeveloperSession login(Device device, ADI adi, bool interactive) {
 
     return DeveloperSession.login(
         device,
-        adi,
         appleId,
         password,
         (sendCode, submitCode) {
@@ -148,28 +143,6 @@ DeveloperSession login(Device device, ADI adi, bool interactive) {
     );
 }
 
-auto initializeADI(string configurationPath)
-{
-    scope log = getLogger();
-    if (!(file.exists(configurationPath.buildPath("lib/libstoreservicescore.so")) && file.exists(configurationPath.buildPath("lib/libCoreADI.so")))) {
-        auto succeeded = downloadAndInstallDeps(configurationPath, (progress) {
-            write(format!"%.2f %% completed\r"(progress * 100));
-            stdout.flush();
-
-            return false;
-        });
-
-        if (!succeeded) {
-            log.error("Download failed.");
-            exit(1);
-        }
-        log.info("Download completed.");
-    }
-
-    scope provisioningData = app.initializeADI(configurationPath);
-    return provisioningData;
-}
-
 string systemConfigurationPath()
 {
     return environment.get("SIDELOADER_CONFIG_DIR").orDefault(defaultConfigurationPath());
@@ -189,19 +162,13 @@ string defaultConfigurationPath()
     return configurationPath.buildPath("Sideloader");
 }
 
-// planned commands
-
 import app_id;
 import certificate;
 import device;
 import install;
-// @(Command("login").Description("Log-in to your Apple account."))
-// @(Command("logout").Description("Log-out."))
 import sign;
-// @(Command("swift-setup").Description("Set-up certificates to build a Swift Package Manager iOS application (requires SPM in the path)."))
 import team;
 import tool;
-// @(Command("tweak").Description("Install a tweak in an ipa file."))
 
 mixin template LoginCommand()
 {
@@ -209,7 +176,7 @@ mixin template LoginCommand()
     @(NamedArgument("i", "interactive").Description("Prompt to type passwords if needed."))
     bool interactive = false;
 
-    final auto login(Device device, ADI adi) => cli_frontend.login(device, adi, interactive);
+    final auto login(Device device) => cli_frontend.login(device, interactive);
 }
 
 @(Command("version").Description("Print the version."))
@@ -265,4 +232,3 @@ struct Commands
 }
 
 mixin CLI!Commands.main!entryPoint;
-
