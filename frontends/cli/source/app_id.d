@@ -48,11 +48,10 @@ struct ListAppIds
 
         string configurationPath = systemConfigurationPath();
 
-        scope provisioningData = initializeADI(configurationPath);
-        scope adi = provisioningData.adi;
+        scope provisioningData = app.initializeADI(configurationPath);
         scope akDevice = provisioningData.device;
 
-        auto appleAccount = login(akDevice, adi);
+        auto appleAccount = login(akDevice);
 
         if (!appleAccount) {
             return 1;
@@ -100,11 +99,10 @@ struct AddAppId
 
         string configurationPath = systemConfigurationPath();
 
-        scope provisioningData = initializeADI(configurationPath);
-        scope adi = provisioningData.adi;
+        scope provisioningData = app.initializeADI(configurationPath);
         scope akDevice = provisioningData.device;
 
-        auto appleAccount = login(akDevice, adi);
+        auto appleAccount = login(akDevice);
 
         if (!appleAccount) {
             return 1;
@@ -145,11 +143,10 @@ struct DeleteAppId
 
         string configurationPath = systemConfigurationPath();
 
-        scope provisioningData = initializeADI(configurationPath);
-        scope adi = provisioningData.adi;
+        scope provisioningData = app.initializeADI(configurationPath);
         scope akDevice = provisioningData.device;
 
-        auto appleAccount = login(akDevice, adi);
+        auto appleAccount = login(akDevice);
 
         if (!appleAccount) {
             return 1;
@@ -201,11 +198,10 @@ struct DownloadProvision
 
         string configurationPath = systemConfigurationPath();
 
-        scope provisioningData = initializeADI(configurationPath);
-        scope adi = provisioningData.adi;
+        scope provisioningData = app.initializeADI(configurationPath);
         scope akDevice = provisioningData.device;
 
-        auto appleAccount = login(akDevice, adi);
+        auto appleAccount = login(akDevice);
 
         if (!appleAccount) {
             return 1;
@@ -238,4 +234,3 @@ struct DownloadProvision
         return 0;
     }
 }
-
